@@ -27,11 +27,23 @@ import logging
 from datetime import datetime
 from collections import deque, defaultdict
 
-import pandas as pd
-from dotenv import load_dotenv
-from telegram import Update
-from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+import csv
+try:
+    from dotenv import load_dotenv  # type: ignore
+except ImportError:  # pragma: no cover - fallback simples
+    def load_dotenv(*_args, **_kwargs):
+        """Fallback caso python-dotenv não esteja instalado."""
+        return False
+try:
+    from telegram import Update
+    from telegram.constants import ParseMode
+    from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+except ModuleNotFoundError as exc:  # pragma: no cover - feedback amigável
+    raise RuntimeError(
+        "Dependência 'python-telegram-bot' não encontrada. Instale com "
+        "'pip install python-telegram-bot>=20' antes de executar o bot."
+    ) from exc
+
 
 # ====== Configurações básicas ======
 load_dotenv()
@@ -135,21 +147,41 @@ def cache_key(user_id: int, text: str) -> str:
     return f"{user_id}:{h}"
 
 # ====== Carrega FAQ CSV ======
-try:
-    FAQ = pd.read_csv(FAQ_CSV_PATH)
-    FAQ["user_examples"] = FAQ["user_examples"].fillna("")
-    FAQ["answer_pt_br"] = FAQ["answer_pt_br"].fillna("")
-except Exception as e:
-    logger.warning(f"Não foi possível carregar {FAQ_CSV_PATH}: {e}")
-    FAQ = pd.DataFrame(columns=["intent_id", "user_examples", "answer_pt_br", "citations"])
+def load_faq(path: str) -> list[dict]:
+    entries: list[dict] = []
+    if not path:
+        return entries
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                if not isinstance(row, dict):
+                    continue
+                entries.append(
+                    {
+                        "intent_id": (row.get("intent_id") or "").strip(),
+                        "user_examples": (row.get("user_examples") or "").strip(),
+                        "answer_pt_br": (row.get("answer_pt_br") or "").strip(),
+                        "citations": (row.get("citations") or "").strip(),
+                    }
+                )
+    except FileNotFoundError:
+        logger.warning(f"Arquivo de FAQ não encontrado: {path}")
+    except Exception as e:
+        logger.warning(f"Não foi possível carregar {path}: {e}")
+    return entries
 
+
+FAQ = load_faq(FAQ_CSV_PATH)
 def search_faq(query: str) -> str | None:
     q = query.lower()
     # Busca simples por termos listados em 'user_examples', separados por ';'
-    for _, row in FAQ.iterrows():
+    for row in FAQ:
         examples = [t.strip().lower() for t in str(row.get("user_examples", "")).split(";") if t.strip()]
-        if any(term in q for term in examples):
-            return row.get("answer_pt_br", "").strip() or None
+        if any(term and term in q for term in examples):
+            answer = row.get("answer_pt_br", "").strip()
+            if answer:
+                return answer
     return None
 
 # ====== Cliente OpenAI (Responses API) ======
